@@ -3,30 +3,46 @@ import json
 import subprocess
 import tempfile
 from flask import Flask, request, jsonify
-
+import os, tempfile, subprocess, shutil
 app = Flask(__name__)
 
-NSJAIL_CFG = '/app/nsjail.cfg'
 MAX_SCRIPT_SIZE = 100000
+NSJAIL_BIN = shutil.which("nsjail") or "/usr/bin/nsjail"
+NSJAIL_CFG = os.getenv("NSJAIL_CFG", "/app/nsjail.cfg")
+PYTHON_BIN = "/usr/local/bin/python3"  
 
+NSJAIL_BIN = shutil.which("nsjail") or "/usr/local/bin/nsjail"
+PYTHON_BIN = "/usr/local/bin/python3"
 
-def run_script(script):
-        tmpdir = tempfile.mkdtemp()
-        script_path = os.path.join(tmpdir, "script.py")
-        with open(script_path, "w") as f:
-            f.write(script)
-        
-        cmd = ["nsjail","--config",NSJAIL_CFG, 
-               "--bindmount_ro",tmpdir,"--", 
-               "/usr/local/bin/python3",script_path]
-        
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            return proc.stdout, proc.stderr, proc.returncode
-        except subprocess.TimeoutExpired:
-            return "", "Execution timeout", -1
-        except Exception as e:
-            return "", str(e), -1
+def run_script_in_nsjail(script: str, timeout_sec: int = 10):
+    tmpdir = tempfile.mkdtemp(prefix="exec_", dir="/tmp")  
+    script_path = os.path.join(tmpdir, "script.py")
+    with open(script_path, "w") as f:
+        f.write(script)
+    # no mounts
+    cmd = [
+        NSJAIL_BIN,
+        "--disable_clone_newuser",
+        "--disable_clone_newpid",
+        "--disable_clone_newuts",
+        "--disable_clone_newipc",
+        "--disable_clone_newnet",
+        "--disable_clone_newcgroup",
+        "--disable_clone_newns",
+        "--time_limit", "10",
+        "--rlimit_as", "268435456",  
+        "--rlimit_cpu", "5",
+        "--rlimit_fsize", "10485760", 
+        "--", PYTHON_BIN, script_path,
+    ]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+        stdout, stderr, code = proc.stdout, proc.stderr, proc.returncode
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return stdout, stderr, code
 
 
 @app.route('/execute', methods=['POST'])
@@ -76,7 +92,7 @@ except Exception as err:
     print(json.dumps({{"error": str(err)}}))
 """
     
-    out, err, status = run_script(wrapped_script)
+    out, err, status = run_script_in_nsjail(wrapped_script)
     
     if status != 0:
         return jsonify({"error": "Script failed", "stderr": err}), 400
